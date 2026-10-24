@@ -1,0 +1,12 @@
+# Packaged templates written by `aws cloudformation package`
+packaged*.yaml
+.aws-sam/
+# Local tooling
+.venv/
+__pycache__/
+*.pyc
+# Never commit credentials or session material
+*.pem
+*.ppk
+*.rdp
+.env

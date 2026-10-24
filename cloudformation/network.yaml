@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  ASRS lab - network. One VPC, a Linux subnet and a Windows subnet, an Internet
+  Gateway for outbound traffic (no NAT Gateway), a free S3 gateway endpoint and
+  optional SSM interface endpoints.
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvironmentName:
+    Type: String
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+  LinuxSubnetCidr:
+    Type: String
+    Default: 10.20.1.0/24
+  WindowsSubnetCidr:
+    Type: String
+    Default: 10.20.2.0/24
+  LinuxAvailabilityZone:
+    Type: String
+    Default: ""
+    Description: Empty uses the region's first Availability Zone.
+  WindowsAvailabilityZone:
+    Type: String
+    Default: ""
+    Description: Empty uses the region's second Availability Zone.
+  EnableSsmVpcEndpoints:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >-
+      Create interface endpoints for ssm, ssmmessages and ec2messages. Not needed
+      for SSM to work (instances reach SSM over the Internet Gateway). Costs about
+      USD 0.01/hour per endpoint per subnet.
+
+Conditions:
+  CreateSsmEndpoints: !Equals [!Ref EnableSsmVpcEndpoints, "true"]
+  DefaultLinuxAz: !Equals [!Ref LinuxAvailabilityZone, ""]
+  DefaultWindowsAz: !Equals [!Ref WindowsAvailabilityZone, ""]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-vpc" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-igw" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subnets are "public" only in the routing sense: they route 0.0.0.0/0 to the
+  # Internet Gateway so the instances can reach SSM and OS update repositories
+  # without a NAT Gateway. Nothing is reachable from the internet because the
+  # security groups have no internet ingress rules.
+  LinuxSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref LinuxSubnetCidr
+      AvailabilityZone: !If [DefaultLinuxAz, !Select [0, !GetAZs ""], !Ref LinuxAvailabilityZone]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-linux-subnet" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  WindowsSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref WindowsSubnetCidr
+      AvailabilityZone: !If [DefaultWindowsAz, !Select [1, !GetAZs ""], !Ref WindowsAvailabilityZone]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-windows-subnet" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-rt" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  LinuxSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LinuxSubnet
+      RouteTableId: !Ref RouteTable
+
+  WindowsSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref WindowsSubnet
+      RouteTableId: !Ref RouteTable
+
+  # Gateway endpoints are free. Amazon Linux 2023 package repositories are
+  # served from S3, so dnf traffic stays on the AWS network.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      RouteTableIds: [!Ref RouteTable]
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateSsmEndpoints
+    Properties:
+      GroupDescription: HTTPS from inside the lab VPC to the SSM interface endpoints
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from lab instances
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: Responses stay inside the VPC
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-endpoints-sg" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSsmEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref LinuxSubnet, !Ref WindowsSubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSsmEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref LinuxSubnet, !Ref WindowsSubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSsmEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref LinuxSubnet, !Ref WindowsSubnet]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  VpcCidr:
+    Value: !GetAtt Vpc.CidrBlock
+  LinuxSubnetId:
+    Value: !Ref LinuxSubnet
+  WindowsSubnetId:
+    Value: !Ref WindowsSubnet
+  RouteTableId:
+    Value: !Ref RouteTable
+  SsmEndpointsEnabled:
+    Value: !Ref EnableSsmVpcEndpoints

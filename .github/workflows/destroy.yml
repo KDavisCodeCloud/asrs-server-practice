@@ -1,0 +1,124 @@
+name: destroy
+
+# Manual only. Requires typing the stack name AND approval in the
+# "lab-destroy" GitHub Environment.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type the stack name (default asrs-lab) to confirm deletion
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: asrs-lab-stack
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  STACK_NAME: ${{ vars.STACK_NAME || 'asrs-lab' }}
+  PROJECT_NAME: ${{ vars.PROJECT_NAME || 'asrs-lab' }}
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the typed confirmation
+        env:
+          TYPED: ${{ inputs.confirm }}
+        run: |
+          if [ "$TYPED" != "$STACK_NAME" ]; then
+            echo "::error::Confirmation '$TYPED' does not match stack name '$STACK_NAME'. Nothing was deleted."
+            exit 1
+          fi
+          echo "Confirmed: will delete $STACK_NAME after environment approval."
+
+  destroy:
+    needs: confirm
+    runs-on: ubuntu-latest
+    environment: lab-destroy
+    timeout-minutes: 60
+    steps:
+      - name: Assume the deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: asrs-lab-destroy-${{ github.run_id }}
+
+      - name: Record what the stack owns before deletion
+        id: before
+        run: |
+          status=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE)
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" = "NONE" ]; then
+            echo "Stack $STACK_NAME does not exist; will only report leftovers."
+            exit 0
+          fi
+          vpc=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='VpcId'].OutputValue" --output text || true)
+          volumes=""
+          if [ -n "$vpc" ] && [ "$vpc" != "None" ]; then
+            ids=$(aws ec2 describe-instances --filters "Name=vpc-id,Values=$vpc" \
+              --query "Reservations[].Instances[].InstanceId" --output text)
+            if [ -n "$ids" ]; then
+              volumes=$(aws ec2 describe-volumes --filters "Name=attachment.instance-id,Values=${ids// /,}" \
+                --query "Volumes[].VolumeId" --output text)
+            fi
+          fi
+          echo "Volumes attached at deletion time: ${volumes:-none}"
+          echo "volumes=$volumes" >> "$GITHUB_OUTPUT"
+
+      - name: Delete the stack and wait
+        if: steps.before.outputs.status != 'NONE'
+        run: |
+          aws cloudformation delete-stack --stack-name "$STACK_NAME"
+          if ! aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"; then
+            echo "::error::Deletion did not complete. Failed resources:"
+            aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
+              --query "StackEvents[?ResourceStatus=='DELETE_FAILED'].[LogicalResourceId,ResourceStatusReason]" \
+              --output table | head -40
+            exit 1
+          fi
+          echo "Stack $STACK_NAME deleted."
+
+      - name: Report retained resources (these still cost money)
+        if: always()
+        env:
+          VOLUMES: ${{ steps.before.outputs.volumes }}
+        run: |
+          {
+            echo "## Teardown report for $STACK_NAME ($AWS_REGION)"
+            echo
+            echo "### Snapshots tagged Project=$PROJECT_NAME"
+            aws ec2 describe-snapshots --owner-ids self --filters "Name=tag:Project,Values=$PROJECT_NAME" \
+              --query "Snapshots[].[SnapshotId,VolumeSize,StartTime,Description]" --output table
+            if [ -n "$VOLUMES" ]; then
+              echo
+              echo "### Snapshots taken from the lab's volumes (tagged or not)"
+              aws ec2 describe-snapshots --owner-ids self --filters "Name=volume-id,Values=${VOLUMES// /,}" \
+                --query "Snapshots[].[SnapshotId,VolumeId,VolumeSize,StartTime]" --output table
+            fi
+            echo
+            echo "### EBS volumes still tagged Project=$PROJECT_NAME"
+            aws ec2 describe-volumes --filters "Name=tag:Project,Values=$PROJECT_NAME" \
+              --query "Volumes[].[VolumeId,State,Size,AvailabilityZone]" --output table
+            echo
+            echo "### AMIs you created tagged Project=$PROJECT_NAME"
+            aws ec2 describe-images --owners self --filters "Name=tag:Project,Values=$PROJECT_NAME" \
+              --query "Images[].[ImageId,Name,CreationDate]" --output table
+            echo
+            echo "### Elastic IPs tagged Project=$PROJECT_NAME"
+            aws ec2 describe-addresses --filters "Name=tag:Project,Values=$PROJECT_NAME" \
+              --query "Addresses[].[PublicIp,AllocationId,AssociationId]" --output table
+            echo
+            echo "### Always retained by design"
+            echo "- Bootstrap stack (OIDC provider, GitHub roles, CloudFormation execution role, artifact bucket). Free apart from a few KB in S3; remove it only if you are finished with the lab for good (docs/TEARDOWN.md section 3)."
+            echo "- A customer-managed KMS key, if you created one, is scheduled for deletion (7-day waiting period) rather than deleted at once."
+            echo
+            echo "Empty tables above mean nothing was left behind. Untagged resources you created by hand in the console are not detected; check docs/TEARDOWN.md section 2."
+          } | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,250 @@
+name: deploy
+
+# Manual only. The job waits for approval in the "lab" GitHub Environment
+# before it can assume the AWS deploy role.
+on:
+  workflow_dispatch:
+    inputs:
+      linux_instance_type:
+        description: Linux instance type
+        default: t3.micro
+        required: true
+      windows_instance_type:
+        description: Windows instance type
+        default: t3.small
+        required: true
+      linux_root_gib:
+        description: Linux root volume size (GiB). Changing it later REPLACES the server.
+        default: "20"
+        required: true
+      windows_root_gib:
+        description: Windows root volume size (GiB, min 30). Changing it later REPLACES the server.
+        default: "40"
+        required: true
+      create_data_volumes:
+        description: Attach one raw 5 GiB data volume to each server
+        type: boolean
+        default: true
+      create_kms_key:
+        description: Encrypt EBS with a new customer-managed KMS key (about USD 1/month). Changing it later REPLACES both servers.
+        type: boolean
+        default: false
+      enable_ssm_vpc_endpoints:
+        description: Add SSM interface endpoints (about USD 0.06/hour; not required)
+        type: boolean
+        default: false
+      availability_zones:
+        description: "Optional 'linuxAz,windowsAz' (e.g. us-east-1a,us-east-1b). Blank = first two AZs. Changing it replaces the servers."
+        default: ""
+        required: false
+      refresh_amis:
+        description: Move to the newest AMIs. REPLACES both servers and erases your work.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write   # GitHub OIDC token for AWS
+
+concurrency:
+  group: asrs-lab-stack
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  STACK_NAME: ${{ vars.STACK_NAME || 'asrs-lab' }}
+  PROJECT_NAME: ${{ vars.PROJECT_NAME || 'asrs-lab' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: lab
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check repository variables
+        run: |
+          missing=0
+          for v in AWS_REGION AWS_DEPLOY_ROLE_ARN CFN_EXECUTION_ROLE_ARN ARTIFACT_BUCKET; do
+            case "$v" in
+              AWS_REGION) val="${{ vars.AWS_REGION }}" ;;
+              AWS_DEPLOY_ROLE_ARN) val="${{ vars.AWS_DEPLOY_ROLE_ARN }}" ;;
+              CFN_EXECUTION_ROLE_ARN) val="${{ vars.CFN_EXECUTION_ROLE_ARN }}" ;;
+              ARTIFACT_BUCKET) val="${{ vars.ARTIFACT_BUCKET }}" ;;
+            esac
+            if [ -z "$val" ]; then echo "::error::Repository variable $v is not set (see docs/DEPLOYMENT.md)"; missing=1; fi
+          done
+          exit $missing
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Lint before touching AWS
+        run: |
+          pip install --quiet cfn-lint pyyaml
+          cfn-lint
+          python3 scripts/security_checks.py
+
+      - name: Assume the deploy role (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: asrs-lab-deploy-${{ github.run_id }}
+
+      - name: Check the current stack state
+        id: state
+        run: |
+          status=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE)
+          echo "Current status: $status"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            ROLLBACK_COMPLETE|ROLLBACK_FAILED|DELETE_FAILED|UPDATE_ROLLBACK_FAILED|*_IN_PROGRESS)
+              echo "::error::Stack is $status and cannot be updated. Fix or delete it first (docs/TEARDOWN.md, labs/aws-05)."
+              exit 1 ;;
+          esac
+
+      - name: Keep the current AMIs unless a refresh was requested
+        id: ami
+        env:
+          REFRESH: ${{ inputs.refresh_amis }}
+          STATUS: ${{ steps.state.outputs.status }}
+        run: |
+          linux_ami=""; windows_ami=""
+          if [ "$STATUS" != "NONE" ] && [ "$REFRESH" != "true" ]; then
+            out() { aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+            linux_ami=$(out LinuxAmiId); windows_ami=$(out WindowsAmiId)
+            [ "$linux_ami" = "None" ] && linux_ami=""
+            [ "$windows_ami" = "None" ] && windows_ami=""
+          fi
+          echo "Linux AMI pin:   ${linux_ami:-latest}"
+          echo "Windows AMI pin: ${windows_ami:-latest}"
+          echo "linux=$linux_ami" >> "$GITHUB_OUTPUT"
+          echo "windows=$windows_ami" >> "$GITHUB_OUTPUT"
+
+      - name: Parse Availability Zones
+        id: az
+        env:
+          AZS: ${{ inputs.availability_zones }}
+        run: |
+          linux_az=""; windows_az=""
+          if [ -n "$AZS" ]; then
+            IFS=',' read -r linux_az windows_az <<< "${AZS// /}"
+          fi
+          echo "linux=$linux_az" >> "$GITHUB_OUTPUT"
+          echo "windows=$windows_az" >> "$GITHUB_OUTPUT"
+
+      - name: Package nested templates to S3
+        run: |
+          aws cloudformation package \
+            --template-file cloudformation/main.yaml \
+            --s3-bucket "${{ vars.ARTIFACT_BUCKET }}" \
+            --s3-prefix "$STACK_NAME/${{ github.sha }}" \
+            --output-template-file packaged-main.yaml
+
+      - name: Create or update the stack (waits for completion)
+        # Inputs are passed through env, never pasted into the script, so a
+        # crafted input value cannot inject shell commands.
+        env:
+          IN_LINUX_TYPE: ${{ inputs.linux_instance_type }}
+          IN_WINDOWS_TYPE: ${{ inputs.windows_instance_type }}
+          IN_LINUX_ROOT: ${{ inputs.linux_root_gib }}
+          IN_WINDOWS_ROOT: ${{ inputs.windows_root_gib }}
+          IN_DATA_VOLUMES: ${{ inputs.create_data_volumes }}
+          IN_KMS_KEY: ${{ inputs.create_kms_key }}
+          IN_SSM_ENDPOINTS: ${{ inputs.enable_ssm_vpc_endpoints }}
+          LINUX_AZ: ${{ steps.az.outputs.linux }}
+          WINDOWS_AZ: ${{ steps.az.outputs.windows }}
+          LINUX_AMI: ${{ steps.ami.outputs.linux }}
+          WINDOWS_AMI: ${{ steps.ami.outputs.windows }}
+          CFN_ROLE: ${{ vars.CFN_EXECUTION_ROLE_ARN }}
+          REPO: ${{ github.repository }}
+        run: |
+          aws cloudformation deploy \
+            --stack-name "$STACK_NAME" \
+            --template-file packaged-main.yaml \
+            --role-arn "$CFN_ROLE" \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+            --no-fail-on-empty-changeset \
+            --tags Project="$PROJECT_NAME" ManagedBy=github-actions Repository="$REPO" \
+            --parameter-overrides \
+              ProjectName="$PROJECT_NAME" \
+              LinuxInstanceType="$IN_LINUX_TYPE" \
+              WindowsInstanceType="$IN_WINDOWS_TYPE" \
+              LinuxRootVolumeSize="$IN_LINUX_ROOT" \
+              WindowsRootVolumeSize="$IN_WINDOWS_ROOT" \
+              CreateDataVolumes="$IN_DATA_VOLUMES" \
+              CreateKmsKey="$IN_KMS_KEY" \
+              EnableSsmVpcEndpoints="$IN_SSM_ENDPOINTS" \
+              LinuxAvailabilityZone="$LINUX_AZ" \
+              WindowsAvailabilityZone="$WINDOWS_AZ" \
+              LinuxPinnedAmiId="$LINUX_AMI" \
+              WindowsPinnedAmiId="$WINDOWS_AMI"
+
+      - name: Show failure events (root and nested stacks)
+        if: failure()
+        run: |
+          echo "## Failed resources" >> "$GITHUB_STEP_SUMMARY"
+          for s in $(aws cloudformation list-stack-resources --stack-name "$STACK_NAME" \
+                      --query "StackResourceSummaries[?ResourceType=='AWS::CloudFormation::Stack'].PhysicalResourceId" \
+                      --output text 2>/dev/null) "$STACK_NAME"; do
+            aws cloudformation describe-stack-events --stack-name "$s" \
+              --query "StackEvents[?contains(ResourceStatus,'FAILED')].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
+              --output table 2>/dev/null | head -40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          done
+
+      - name: Stack outputs
+        run: |
+          aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].Outputs' --output json > outputs.json
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          rows = {o["OutputKey"]: o["OutputValue"] for o in json.load(open("outputs.json"))}
+          print("## ASRS lab deployed\n\n| Output | Value |\n|---|---|")
+          for k in ["VpcId", "LinuxSubnetId", "WindowsSubnetId", "LinuxInstanceId",
+                    "LinuxPrivateIp", "WindowsInstanceId", "WindowsPrivateIp",
+                    "LinuxDataVolumeId", "WindowsDataVolumeId", "LinuxAmiId", "WindowsAmiId"]:
+              print(f"| {k} | `{rows.get(k, '')}` |")
+          EOF
+          cat outputs.json
+
+      - name: Wait for both servers to register with SSM
+        run: |
+          out() { aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          linux=$(out LinuxInstanceId); windows=$(out WindowsInstanceId)
+          # Windows takes several minutes on first boot.
+          for i in $(seq 1 40); do
+            online=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$linux,$windows" \
+              --query "InstanceInformationList[?PingStatus=='Online'].InstanceId" --output text)
+            n=$(echo "$online" | wc -w)
+            echo "Attempt $i: $n/2 online ($online)"
+            [ "$n" -ge 2 ] && break
+            sleep 30
+          done
+          {
+            echo "## SSM status"
+            aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$linux,$windows" \
+              --query "InstanceInformationList[].[InstanceId,PlatformName,PingStatus,AgentVersion]" --output table
+            echo
+            echo "## Connect (from your machine, signed in with your Identity Center profile)"
+            echo '```bash'
+            echo "aws sso login --profile asrs-admin"
+            echo "# Linux shell (runs as ssm-user, which has sudo)"
+            echo "aws ssm start-session --profile asrs-admin --region $AWS_REGION --target $linux"
+            echo "# Windows PowerShell (runs as ssm-user, a local administrator)"
+            echo "aws ssm start-session --profile asrs-admin --region $AWS_REGION --target $windows"
+            echo "# Windows desktop: forward RDP to localhost:13389, then connect an RDP client there"
+            echo "aws ssm start-session --profile asrs-admin --region $AWS_REGION --target $windows \\"
+            echo "  --document-name AWS-StartPortForwardingSession --parameters 'portNumber=3389,localPortNumber=13389'"
+            echo '```'
+            echo "See docs/ACCESS.md. Stop the servers with the stop-start workflow when you finish."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$(echo "$online" | wc -w)" -lt 2 ]; then
+            echo "::warning::Not every server is Online in SSM yet. Windows can take 10+ minutes on first boot; see labs/aws-03 if it never appears."
+          fi

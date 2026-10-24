@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  ASRS server practice lab - root stack. Deploys network, security, IAM, an
+  Amazon Linux 2023 server, a Windows Server 2022 server and optional data
+  volumes as nested stacks. Package with `aws cloudformation package` (the
+  deploy workflow does this) so the nested TemplateURLs point at S3.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [ProjectName, EnvironmentName]
+      - Label: { default: Compute }
+        Parameters: [LinuxInstanceType, WindowsInstanceType, KeyPairName, LinuxPinnedAmiId, WindowsPinnedAmiId]
+      - Label: { default: Storage }
+        Parameters: [LinuxRootVolumeSize, WindowsRootVolumeSize, CreateDataVolumes, DataVolumeSize, CreateKmsKey, ExistingKmsKeyArn]
+      - Label: { default: Network }
+        Parameters: [LinuxAvailabilityZone, WindowsAvailabilityZone, EnableSsmVpcEndpoints]
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: asrs-lab
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+    Description: >-
+      Prefix for names, tags and the IAM path. The bootstrap roles are scoped to
+      this value, so change it there too if you change it here.
+  EnvironmentName:
+    Type: String
+    Default: lab
+    AllowedPattern: "^[a-z][a-z0-9-]{1,15}$"
+  LinuxInstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedPattern: "^[a-z][a-z0-9-]*\\.[a-z0-9]+$"
+  WindowsInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedPattern: "^[a-z][a-z0-9-]*\\.[a-z0-9]+$"
+  LinuxRootVolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 8
+    MaxValue: 100
+  WindowsRootVolumeSize:
+    Type: Number
+    Default: 40
+    MinValue: 30
+    MaxValue: 200
+  CreateDataVolumes:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: Attach one raw data volume to each server for disk exercises.
+  DataVolumeSize:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 50
+  CreateKmsKey:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  ExistingKmsKeyArn:
+    Type: String
+    Default: ""
+  LinuxAvailabilityZone:
+    Type: String
+    Default: ""
+    Description: >-
+      Empty uses the first AZ in the region. Set it if that AZ does not offer
+      the instance type (for example us-east-1e has no t3).
+  WindowsAvailabilityZone:
+    Type: String
+    Default: ""
+    Description: Empty uses the second AZ in the region.
+  EnableSsmVpcEndpoints:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  KeyPairName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 key pair. SSM access does not need one.
+  LinuxPinnedAmiId:
+    Type: String
+    Default: ""
+    Description: >-
+      Keep this AMI. Empty uses the latest Amazon Linux 2023 AMI. Changing the
+      AMI replaces the server (and everything you did on it).
+  WindowsPinnedAmiId:
+    Type: String
+    Default: ""
+    Description: >-
+      Keep this AMI. Empty uses the latest Windows Server 2022 AMI. Changing the
+      AMI replaces the server (and everything you did on it).
+
+Conditions:
+  WantDataVolumes: !Equals [!Ref CreateDataVolumes, "true"]
+
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: network.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        EnvironmentName: !Ref EnvironmentName
+        EnableSsmVpcEndpoints: !Ref EnableSsmVpcEndpoints
+        LinuxAvailabilityZone: !Ref LinuxAvailabilityZone
+        WindowsAvailabilityZone: !Ref WindowsAvailabilityZone
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+  Security:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: security.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        EnvironmentName: !Ref EnvironmentName
+        VpcId: !GetAtt Network.Outputs.VpcId
+        CreateKmsKey: !Ref CreateKmsKey
+        ExistingKmsKeyArn: !Ref ExistingKmsKeyArn
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+  Iam:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: iam.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        EnvironmentName: !Ref EnvironmentName
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+  Linux:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: linux-ec2.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        EnvironmentName: !Ref EnvironmentName
+        SubnetId: !GetAtt Network.Outputs.LinuxSubnetId
+        SecurityGroupId: !GetAtt Security.Outputs.LinuxSecurityGroupId
+        InstanceProfileName: !GetAtt Iam.Outputs.LinuxInstanceProfileName
+        InstanceType: !Ref LinuxInstanceType
+        PinnedAmiId: !Ref LinuxPinnedAmiId
+        RootVolumeSize: !Ref LinuxRootVolumeSize
+        KmsKeyArn: !GetAtt Security.Outputs.EbsKmsKeyArn
+        KeyPairName: !Ref KeyPairName
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+  Windows:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: windows-ec2.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        EnvironmentName: !Ref EnvironmentName
+        SubnetId: !GetAtt Network.Outputs.WindowsSubnetId
+        SecurityGroupId: !GetAtt Security.Outputs.WindowsSecurityGroupId
+        InstanceProfileName: !GetAtt Iam.Outputs.WindowsInstanceProfileName
+        InstanceType: !Ref WindowsInstanceType
+        PinnedAmiId: !Ref WindowsPinnedAmiId
+        RootVolumeSize: !Ref WindowsRootVolumeSize
+        KmsKeyArn: !GetAtt Security.Outputs.EbsKmsKeyArn
+        KeyPairName: !Ref KeyPairName
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+  Storage:
+    Type: AWS::CloudFormation::Stack
+    Condition: WantDataVolumes
+    Properties:
+      TemplateURL: storage.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        EnvironmentName: !Ref EnvironmentName
+        LinuxInstanceId: !GetAtt Linux.Outputs.InstanceId
+        LinuxAvailabilityZone: !GetAtt Linux.Outputs.AvailabilityZone
+        WindowsInstanceId: !GetAtt Windows.Outputs.InstanceId
+        WindowsAvailabilityZone: !GetAtt Windows.Outputs.AvailabilityZone
+        DataVolumeSize: !Ref DataVolumeSize
+        KmsKeyArn: !GetAtt Security.Outputs.EbsKmsKeyArn
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+Outputs:
+  VpcId:
+    Value: !GetAtt Network.Outputs.VpcId
+  LinuxSubnetId:
+    Value: !GetAtt Network.Outputs.LinuxSubnetId
+  WindowsSubnetId:
+    Value: !GetAtt Network.Outputs.WindowsSubnetId
+  LinuxSecurityGroupId:
+    Value: !GetAtt Security.Outputs.LinuxSecurityGroupId
+  WindowsSecurityGroupId:
+    Value: !GetAtt Security.Outputs.WindowsSecurityGroupId
+  LinuxInstanceId:
+    Value: !GetAtt Linux.Outputs.InstanceId
+  LinuxPrivateIp:
+    Value: !GetAtt Linux.Outputs.PrivateIp
+  LinuxAmiId:
+    Value: !GetAtt Linux.Outputs.AmiId
+  WindowsInstanceId:
+    Value: !GetAtt Windows.Outputs.InstanceId
+  WindowsPrivateIp:
+    Value: !GetAtt Windows.Outputs.PrivateIp
+  WindowsAmiId:
+    Value: !GetAtt Windows.Outputs.AmiId
+  LinuxInstanceRoleName:
+    Value: !GetAtt Iam.Outputs.LinuxInstanceRoleName
+  WindowsInstanceRoleName:
+    Value: !GetAtt Iam.Outputs.WindowsInstanceRoleName
+  EbsKmsKeyArn:
+    Value: !GetAtt Security.Outputs.EbsKmsKeyArn
+  LinuxDataVolumeId:
+    Value: !If [WantDataVolumes, !GetAtt Storage.Outputs.LinuxDataVolumeId, "none"]
+  WindowsDataVolumeId:
+    Value: !If [WantDataVolumes, !GetAtt Storage.Outputs.WindowsDataVolumeId, "none"]
+  LinuxSessionCommand:
+    Value: !Sub
+      - "aws ssm start-session --region ${AWS::Region} --target ${Id}"
+      - Id: !GetAtt Linux.Outputs.InstanceId
+  WindowsSessionCommand:
+    Value: !Sub
+      - "aws ssm start-session --region ${AWS::Region} --target ${Id}"
+      - Id: !GetAtt Windows.Outputs.InstanceId

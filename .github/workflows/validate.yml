@@ -1,0 +1,46 @@
+name: validate
+
+# Static checks only. This workflow never talks to AWS and needs no credentials.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  templates:
+    name: CloudFormation lint and security checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: pip install --quiet cfn-lint checkov pyyaml
+
+      - name: cfn-lint
+        run: cfn-lint   # reads .cfnlintrc.yaml (cloudformation/ and bootstrap/)
+
+      - name: Lab guardrails (no public ingress, encrypted EBS, IMDSv2, no OS automation)
+        run: python3 scripts/security_checks.py
+
+      - name: Checkov (common AWS and GitHub Actions misconfigurations)
+        # CKV_GHA_7 forbids workflow_dispatch inputs (a SLSA build rule). The AWS
+        # workflows here are manual by design; their inputs are passed via env.
+        run: checkov -d . --framework cloudformation github_actions --skip-check CKV_GHA_7 --quiet --compact
+
+  workflows:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color

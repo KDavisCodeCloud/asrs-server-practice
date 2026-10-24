@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  ASRS lab - Amazon Linux 2023 server. Stock AMI, no user data: the SSM agent
+  ships with the AMI, so nothing on the operating system is configured here.
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvironmentName:
+    Type: String
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  InstanceProfileName:
+    Type: String
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  RootVolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 8
+    MaxValue: 100
+  KmsKeyArn:
+    Type: String
+    Default: aws-managed
+    Description: KMS key ARN for EBS, or aws-managed for the AWS-managed aws/ebs key.
+  KeyPairName:
+    Type: String
+    Default: ""
+    Description: Optional. Not needed for SSM access.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: >-
+      Public SSM parameter that resolves to the latest Amazon Linux 2023 AMI in
+      the region. The AMI is resolved when the stack is created or updated.
+
+  PinnedAmiId:
+    Type: String
+    Default: ""
+    Description: >-
+      AMI to keep using. The deploy workflow passes the current AMI on updates so
+      a newer AMI release does not replace the server and erase your work. Empty
+      uses LatestAmiId.
+
+Conditions:
+  UseLatestAmi: !Equals [!Ref PinnedAmiId, ""]
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, aws-managed]]
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+
+Resources:
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !If [UseLatestAmi, !Ref LatestAmiId, !Ref PinnedAmiId]
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfileName
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref AWS::NoValue]
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref SecurityGroupId]
+      Monitoring: false
+      CreditSpecification:
+        CPUCredits: standard
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref RootVolumeSize
+            Encrypted: true
+            KmsKeyId: !If [HasKmsKey, !Ref KmsKeyArn, !Ref AWS::NoValue]
+            DeleteOnTermination: true
+      PropagateTagsToVolumeOnCreation: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-linux" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+        - { Key: Server, Value: linux }
+        - { Key: OS, Value: AmazonLinux2023 }
+        - { Key: PatchGroup, Value: !Sub "${ProjectName}-linux" }
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  PrivateIp:
+    Value: !GetAtt Instance.PrivateIp
+  AvailabilityZone:
+    Value: !GetAtt Instance.AvailabilityZone
+  AmiId:
+    Value: !If [UseLatestAmi, !Ref LatestAmiId, !Ref PinnedAmiId]

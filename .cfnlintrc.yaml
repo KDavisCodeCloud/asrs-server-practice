@@ -1,0 +1,8 @@
+# cfn-lint settings for this repo.
+templates:
+  - cloudformation/*.yaml
+  - bootstrap/*.yaml
+ignore_checks:
+  # main.yaml uses local TemplateURLs on purpose; `aws cloudformation package`
+  # rewrites them to S3 URLs in deploy.yml.
+  - W3002

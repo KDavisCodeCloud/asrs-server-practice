@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  ASRS lab - optional data volumes. One small encrypted gp3 volume per server,
+  attached raw. Nothing formats, partitions or mounts them: that is the exercise.
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvironmentName:
+    Type: String
+  LinuxInstanceId:
+    Type: AWS::EC2::Instance::Id
+  LinuxAvailabilityZone:
+    Type: String
+  WindowsInstanceId:
+    Type: AWS::EC2::Instance::Id
+  WindowsAvailabilityZone:
+    Type: String
+  DataVolumeSize:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 50
+  KmsKeyArn:
+    Type: String
+    Default: aws-managed
+    Description: KMS key ARN for EBS, or aws-managed for the AWS-managed aws/ebs key.
+
+Conditions:
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, aws-managed]]
+
+Resources:
+  # DeletionPolicy Delete keeps teardown complete. Snapshots you take yourself
+  # are not deleted by the stack; destroy.yml lists any that are left over.
+  LinuxDataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AvailabilityZone: !Ref LinuxAvailabilityZone
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      KmsKeyId: !If [HasKmsKey, !Ref KmsKeyArn, !Ref AWS::NoValue]
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-linux-data" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+        - { Key: Server, Value: linux }
+
+  # On Nitro instances /dev/sdf appears in the OS as an NVMe device
+  # (normally /dev/nvme1n1). Check with lsblk; do not assume the name.
+  LinuxDataAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref LinuxInstanceId
+      VolumeId: !Ref LinuxDataVolume
+      Device: /dev/sdf
+
+  WindowsDataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AvailabilityZone: !Ref WindowsAvailabilityZone
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      KmsKeyId: !If [HasKmsKey, !Ref KmsKeyArn, !Ref AWS::NoValue]
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-windows-data" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+        - { Key: Server, Value: windows }
+
+  # Appears in Windows as a raw, offline disk (Disk 1).
+  WindowsDataAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref WindowsInstanceId
+      VolumeId: !Ref WindowsDataVolume
+      Device: xvdf
+
+Outputs:
+  LinuxDataVolumeId:
+    Value: !Ref LinuxDataVolume
+  WindowsDataVolumeId:
+    Value: !Ref WindowsDataVolume

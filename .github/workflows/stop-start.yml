@@ -1,0 +1,91 @@
+name: stop-start
+
+# Manual only. Stops or starts both lab servers to control cost. Uses a role
+# that can only stop/start instances tagged with the project, so it needs no
+# environment approval. Run it from the default branch.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do with both servers
+        type: choice
+        options: [stop, start, status]
+        default: stop
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: asrs-lab-power
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  STACK_NAME: ${{ vars.STACK_NAME || 'asrs-lab' }}
+
+jobs:
+  power:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Assume the operator role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OPERATOR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: asrs-lab-power-${{ github.run_id }}
+
+      - name: Find the lab servers
+        id: ids
+        run: |
+          out() { aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          linux=$(out LinuxInstanceId); windows=$(out WindowsInstanceId)
+          if [ -z "$linux" ] || [ -z "$windows" ] || [ "$linux" = "None" ]; then
+            echo "::error::Could not read instance IDs from stack $STACK_NAME. Is it deployed?"
+            exit 1
+          fi
+          echo "ids=$linux $windows" >> "$GITHUB_OUTPUT"
+
+      - name: Stop
+        if: inputs.action == 'stop'
+        run: |
+          # shellcheck disable=SC2086
+          aws ec2 stop-instances --instance-ids ${{ steps.ids.outputs.ids }} --output table
+          # shellcheck disable=SC2086
+          aws ec2 wait instance-stopped --instance-ids ${{ steps.ids.outputs.ids }}
+
+      - name: Start
+        if: inputs.action == 'start'
+        run: |
+          # shellcheck disable=SC2086
+          aws ec2 start-instances --instance-ids ${{ steps.ids.outputs.ids }} --output table
+          # shellcheck disable=SC2086
+          aws ec2 wait instance-running --instance-ids ${{ steps.ids.outputs.ids }}
+          echo "Running. Waiting up to 10 minutes for SSM to report both Online..."
+          ids="${{ steps.ids.outputs.ids }}"
+          for i in $(seq 1 20); do
+            n=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${ids// /,}" \
+              --query "length(InstanceInformationList[?PingStatus=='Online'])" --output text)
+            echo "Attempt $i: $n/2 online"
+            [ "$n" -ge 2 ] && break
+            sleep 30
+          done
+
+      - name: Report
+        if: always()
+        run: |
+          ids="${{ steps.ids.outputs.ids }}"
+          [ -z "$ids" ] && exit 0
+          {
+            echo "## Lab servers after '${{ inputs.action }}'"
+            # shellcheck disable=SC2086
+            aws ec2 describe-instances --instance-ids $ids \
+              --query "Reservations[].Instances[].[Tags[?Key=='Name']|[0].Value,InstanceId,State.Name,InstanceType,PrivateIpAddress]" \
+              --output table
+            aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${ids// /,}" \
+              --query "InstanceInformationList[].[InstanceId,PingStatus,LastPingDateTime]" --output table
+            echo
+            echo "Stopped instances still incur EBS storage charges (see docs/COSTS.md)."
+          } | tee -a "$GITHUB_STEP_SUMMARY"

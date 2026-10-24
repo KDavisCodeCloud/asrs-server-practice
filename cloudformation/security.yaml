@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  ASRS lab - security. Separate Linux and Windows security groups with no
+  internet ingress (no SSH 22, no RDP 3389), instance-to-instance rules by
+  security-group reference, and an optional customer-managed KMS key for EBS.
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvironmentName:
+    Type: String
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  CreateKmsKey:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >-
+      Create a customer-managed KMS key for the EBS volumes (about USD 1/month
+      plus requests). When false, volumes use ExistingKmsKeyArn, or the
+      AWS-managed aws/ebs key when that is empty.
+  ExistingKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: ARN of an existing KMS key for EBS. Ignored when CreateKmsKey is true.
+
+Conditions:
+  MakeKey: !Equals [!Ref CreateKmsKey, "true"]
+  UseExistingKey: !And
+    - !Not [!Condition MakeKey]
+    - !Not [!Equals [!Ref ExistingKmsKeyArn, ""]]
+
+Resources:
+  # --- Security groups -------------------------------------------------------
+  # Egress is limited to HTTP/HTTPS (SSM endpoints, dnf repositories, Windows
+  # Update) plus the explicitly permitted lab ports to the peer security group.
+  # DNS (Route 53 Resolver) and time sync (169.254.169.123) are link-local
+  # services that security groups do not filter.
+  LinuxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ASRS lab Linux server - no internet ingress, SSM access only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to SSM endpoints and package repositories
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP to package repositories
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-linux-sg" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  WindowsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ASRS lab Windows server - no internet ingress, SSM access only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to SSM endpoints and Windows Update
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP to Windows Update
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-windows-sg" }
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  # Peer rules are separate resources so the two groups can reference each
+  # other without a circular dependency.
+  LinuxIngressHttpFromWindows:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LinuxSecurityGroup
+      SourceSecurityGroupId: !Ref WindowsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      Description: HTTP from the Windows server (Apache exercises)
+
+  LinuxIngressPingFromWindows:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LinuxSecurityGroup
+      SourceSecurityGroupId: !Ref WindowsSecurityGroup
+      IpProtocol: icmp
+      FromPort: 8
+      ToPort: -1
+      Description: ICMP echo request from the Windows server
+
+  WindowsIngressHttpFromLinux:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref WindowsSecurityGroup
+      SourceSecurityGroupId: !Ref LinuxSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      Description: HTTP from the Linux server (IIS exercises)
+
+  WindowsIngressPingFromLinux:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref WindowsSecurityGroup
+      SourceSecurityGroupId: !Ref LinuxSecurityGroup
+      IpProtocol: icmp
+      FromPort: 8
+      ToPort: -1
+      Description: ICMP echo request from the Linux server
+
+  LinuxEgressPingToWindows:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LinuxSecurityGroup
+      DestinationSecurityGroupId: !Ref WindowsSecurityGroup
+      IpProtocol: icmp
+      FromPort: 8
+      ToPort: -1
+      Description: ICMP echo request to the Windows server
+
+  WindowsEgressPingToLinux:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref WindowsSecurityGroup
+      DestinationSecurityGroupId: !Ref LinuxSecurityGroup
+      IpProtocol: icmp
+      FromPort: 8
+      ToPort: -1
+      Description: ICMP echo request to the Linux server
+  # TCP 80 to the peer is already allowed by the 0.0.0.0/0 port 80 egress rule.
+
+  # --- Optional customer-managed KMS key ------------------------------------
+  EbsKey:
+    Type: AWS::KMS::Key
+    Condition: MakeKey
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Description: !Sub "${ProjectName} EBS encryption key"
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Delegates access to IAM policies in this account. The CloudFormation
+          # execution role and the stop/start role get the EC2-scoped KMS
+          # permissions they need from their own IAM policies.
+          - Sid: EnableIamPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+
+  EbsKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: MakeKey
+    Properties:
+      AliasName: !Sub "alias/${ProjectName}-ebs"
+      TargetKeyId: !Ref EbsKey
+
+Outputs:
+  LinuxSecurityGroupId:
+    Value: !Ref LinuxSecurityGroup
+  WindowsSecurityGroupId:
+    Value: !Ref WindowsSecurityGroup
+  EbsKmsKeyArn:
+    Description: KMS key ARN for EBS volumes, or aws-managed for the AWS-managed aws/ebs key.
+    Value: !If
+      - MakeKey
+      - !GetAtt EbsKey.Arn
+      - !If [UseExistingKey, !Ref ExistingKmsKeyArn, aws-managed]

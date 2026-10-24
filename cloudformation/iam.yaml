@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  ASRS lab - IAM. One role and instance profile per server. Each role has only
+  AmazonSSMManagedInstanceCore, which is what Session Manager and Run Command
+  need. Anything more is left for you to add during the IAM exercises.
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvironmentName:
+    Type: String
+
+Resources:
+  # Roles are unnamed (CloudFormation generates the names) and live under the
+  # /<project>/ path, which is what the bootstrap execution role is scoped to.
+  LinuxInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub "/${ProjectName}/"
+      Description: ASRS lab Linux server - SSM managed instance only
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: !Sub "ec2.${AWS::URLSuffix}" }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+        - { Key: Server, Value: linux }
+
+  LinuxInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: !Sub "/${ProjectName}/"
+      Roles: [!Ref LinuxInstanceRole]
+
+  WindowsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub "/${ProjectName}/"
+      Description: ASRS lab Windows server - SSM managed instance only
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: !Sub "ec2.${AWS::URLSuffix}" }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref EnvironmentName }
+        - { Key: Server, Value: windows }
+
+  WindowsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: !Sub "/${ProjectName}/"
+      Roles: [!Ref WindowsInstanceRole]
+
+Outputs:
+  LinuxInstanceRoleName:
+    Value: !Ref LinuxInstanceRole
+  LinuxInstanceProfileName:
+    Value: !Ref LinuxInstanceProfile
+  WindowsInstanceRoleName:
+    Value: !Ref WindowsInstanceRole
+  WindowsInstanceProfileName:
+    Value: !Ref WindowsInstanceProfile
