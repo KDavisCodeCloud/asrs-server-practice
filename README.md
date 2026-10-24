@@ -9,6 +9,10 @@ security groups, IAM roles and two stock servers. Nothing configures the operati
 no user data, no SSM documents, no patching jobs. Every administration task in `labs/` is yours
 to do by hand through Systems Manager sessions.
 
+![ASRS Server Practice Lab: AWS architecture](docs/images/asrs-architecture.png)
+
+Text version of the diagram, with more detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md):
+
 ```
 GitHub Actions (manual, approval-gated, OIDC)
         │
@@ -46,7 +50,7 @@ bootstrap/            github-oidc-bootstrap.yaml - deploy once, by hand
 scripts/              security_checks.py - lab guardrails used by validate.yml
 labs/                 25 exercises (10 Linux, 10 Windows, 5 AWS)
 labs/solutions/       full solutions - attempt the exercise first
-docs/                 ARCHITECTURE, DEPLOYMENT, ACCESS, COSTS, TEARDOWN, INTERVIEW-PREP
+docs/                 ARCHITECTURE, DEPLOYMENT, ACCESS, COSTS, TEARDOWN, INTERVIEW-PREP; images/ holds the diagram
 PROJECT_PLAN.md       phases, manual setup, acceptance checklist
 ```
 

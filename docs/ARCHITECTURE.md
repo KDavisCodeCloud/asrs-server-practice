@@ -2,6 +2,10 @@
 
 ## Diagram
 
+![ASRS Server Practice Lab: AWS architecture](images/asrs-architecture.png)
+
+Detailed text version, including the identity chain:
+
 ```
                          ┌───────────────────────── AWS account (one region) ─────────────────────────┐
  You (laptop)            │                                                                            │

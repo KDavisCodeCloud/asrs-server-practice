@@ -52,7 +52,7 @@ for this lab.
 ```bash
 cd "ASRS Server practice"
 git add . && git commit -m "ASRS server practice lab"
-gh repo create asrs-server-practice --private --source . --push
+gh repo create asrs-server-practice --public --source . --push   # public: Environment approvals work on the free plan
 # or create the repo in the GitHub UI and: git remote add origin ... && git push -u origin main
 ```
 
