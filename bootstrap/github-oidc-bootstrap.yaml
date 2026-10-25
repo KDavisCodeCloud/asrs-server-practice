@@ -263,6 +263,34 @@ Resources:
                 Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}/*"
                 Condition:
                   StringEquals: { iam:PassedToService: ec2.amazonaws.com }
+              # Nested stacks run with the parent's service role, so CloudFormation
+              # passes this role to itself and manages the child stacks as this role.
+              - Sid: PassSelfToNestedStacks
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-cfn-execution"
+                Condition:
+                  StringEquals: { iam:PassedToService: cloudformation.amazonaws.com }
+              - Sid: ManageNestedLabStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:ListStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:TagResource
+                  - cloudformation:UntagResource
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${LabStackName}-*/*"
+              - Sid: ReadPackagedNestedTemplates
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${ArtifactBucket.Arn}/*"
               - Sid: OptionalEbsKmsKey
                 Effect: Allow
                 Action:
