@@ -78,7 +78,8 @@ aws cloudformation deploy \
   --stack-name asrs-lab-bootstrap \
   --template-file bootstrap/github-oidc-bootstrap.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides GitHubOrg=<your-github-user> GitHubRepo=asrs-server-practice CreateOidcProvider=true
+  --parameter-overrides GitHubOrg=<your-github-user> GitHubRepo=asrs-server-practice CreateOidcProvider=true \
+                        GitHubOwnerId=<owner-id> GitHubRepoId=<repo-id>
 
 aws cloudformation describe-stacks --profile asrs-admin --region us-east-1 \
   --stack-name asrs-lab-bootstrap --query "Stacks[0].Outputs" --output table
@@ -86,6 +87,28 @@ aws cloudformation describe-stacks --profile asrs-admin --region us-east-1 \
 
 `GitHubOrg` and `GitHubRepo` are case-sensitive and must match the repository exactly. If they
 are wrong, the workflows fail with `Not authorized to perform sts:AssumeRoleWithWebIdentity`.
+
+**Immutable OIDC subjects.** New GitHub repositories put numeric IDs in the token subject:
+`repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:lab` instead of `repo:OWNER/REPO:environment:lab`.
+This stops a deleted or renamed repository from being re-created under the same name and
+inheriting your AWS access. Check which format your repository uses before deploying:
+
+```bash
+gh api repos/<owner>/<repo>/actions/oidc/customization/sub
+#   "use_immutable_subject": true, "sub_claim_prefix": "repo:Owner@98239249/repo@1431721716"
+```
+
+If `use_immutable_subject` is true, pass the two numbers as `GitHubOwnerId` and `GitHubRepoId`.
+If it is false or missing, leave them out. The trust policy then uses the classic format.
+
+To see the exact subject AWS rejected, look up the failed call in CloudTrail:
+
+```bash
+aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=AssumeRoleWithWebIdentity \
+  --max-results 5 --query "Events[].CloudTrailEvent" --output text --profile asrs-admin | grep -o '"userName":"[^"]*"'
+```
+
+`userName` is the subject GitHub sent. It must match the role's trust policy exactly.
 
 The bootstrap is free apart from a few kilobytes in S3. Leave it in place between lab sessions.
 

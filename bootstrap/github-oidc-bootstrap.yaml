@@ -13,6 +13,19 @@ Parameters:
   GitHubRepo:
     Type: String
     Description: Repository name only, without the owner.
+  GitHubOwnerId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: >-
+      Numeric GitHub owner ID. Set this and GitHubRepoId when the repository uses
+      immutable OIDC subjects (repo:OWNER@ID/REPO@ID:...), the default for new
+      repositories. Find it with: gh api repos/OWNER/REPO/actions/oidc/customization/sub
+  GitHubRepoId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: Numeric GitHub repository ID. See GitHubOwnerId.
   ProjectName:
     Type: String
     Default: asrs-lab
@@ -45,6 +58,9 @@ Parameters:
 
 Conditions:
   MakeOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+  UseImmutableSubject: !And
+    - !Not [!Equals [!Ref GitHubOwnerId, ""]]
+    - !Not [!Equals [!Ref GitHubRepoId, ""]]
 
 Resources:
   GitHubOidcProvider:
@@ -312,8 +328,18 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
                 token.actions.githubusercontent.com:sub:
-                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:${DeployEnvironment}"
-                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:${DestroyEnvironment}"
+                  - !Sub
+                    - "repo:${Repo}:environment:${DeployEnvironment}"
+                    - Repo: !If
+                        - UseImmutableSubject
+                        - !Sub "${GitHubOrg}@${GitHubOwnerId}/${GitHubRepo}@${GitHubRepoId}"
+                        - !Sub "${GitHubOrg}/${GitHubRepo}"
+                  - !Sub
+                    - "repo:${Repo}:environment:${DestroyEnvironment}"
+                    - Repo: !If
+                        - UseImmutableSubject
+                        - !Sub "${GitHubOrg}@${GitHubOwnerId}/${GitHubRepo}@${GitHubRepoId}"
+                        - !Sub "${GitHubOrg}/${GitHubRepo}"
       Policies:
         - PolicyName: lab-stack-lifecycle
           PolicyDocument:
@@ -406,7 +432,12 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${DefaultBranch}"
+                token.actions.githubusercontent.com:sub: !Sub
+                  - "repo:${Repo}:ref:refs/heads/${DefaultBranch}"
+                  - Repo: !If
+                      - UseImmutableSubject
+                      - !Sub "${GitHubOrg}@${GitHubOwnerId}/${GitHubRepo}@${GitHubRepoId}"
+                      - !Sub "${GitHubOrg}/${GitHubRepo}"
       Policies:
         - PolicyName: lab-power-state
           PolicyDocument:
