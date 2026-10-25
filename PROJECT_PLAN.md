@@ -18,7 +18,7 @@ so all server administration can be practised by hand through SSM sessions.
 | 5 | Hands-on exercises | `labs/` (25 guides) and `labs/solutions/` (25 solutions) | Done |
 | 6 | Architecture, costs, interview prep | `docs/ARCHITECTURE.md`, `docs/COSTS.md`, `docs/INTERVIEW-PREP.md` | Done |
 | 7 | Static validation | cfn-lint, Checkov, actionlint, `scripts/security_checks.py` pass locally | Done |
-| 8 | First real deployment | Run `deploy.yml` in your AWS account, confirm both instances show **Online** in Fleet Manager | **Not started — needs your approval and AWS account** |
+| 8 | First real deployment | Run `deploy.yml` in your AWS account, confirm both instances show **Online** in Fleet Manager | **Done 2026-10-25** (run 40240002742). Two bootstrap permission fixes were needed first: immutable OIDC subject, nested-stack PassRole |
 | 9 | Exercises | Work through `labs/` | Yours |
 
 ## Manual setup still required (cannot be automated from this repo)
@@ -34,10 +34,10 @@ so all server administration can be practised by hand through SSM sessions.
 
 | # | Criterion | How it is met | Proven? |
 |---|---|---|---|
-| 1 | Deploys VPC, 2 subnets, SGs, IAM roles, 2 instances | `cloudformation/main.yaml` + nested stacks | Static validation only |
-| 2 | Both servers reachable through SSM | SSM managed-instance role, egress 443, no inbound | After phase 8 |
+| 1 | Deploys VPC, 2 subnets, SGs, IAM roles, 2 instances | `cloudformation/main.yaml` + nested stacks | Yes, 2026-10-25: `CREATE_COMPLETE` |
+| 2 | Both servers reachable through SSM | SSM managed-instance role, egress 443, no inbound | Yes: both Online; Linux session opened as `ssm-user` |
 | 3 | Manual administration from sessions | No user data, no OS configuration | By design |
-| 4 | Deploys through GitHub Actions | `deploy.yml` (OIDC, environment approval) | After phase 8 |
+| 4 | Deploys through GitHub Actions | `deploy.yml` (OIDC, environment approval) | Yes, run 40240002742 |
 | 5 | Stop and restart | `stop-start.yml` | After phase 8 |
 | 6 | Full destroy through GitHub Actions | `destroy.yml` (typed confirmation, environment approval) | After phase 8 |
 | 7 | 25 exercises documented | `labs/` | Done |
@@ -45,8 +45,8 @@ so all server administration can be practised by hand through SSM sessions.
 | 9 | Templates pass static validation | `validate.yml`, run locally | Done |
 | 10 | Nothing deploys without approval | All AWS workflows are `workflow_dispatch`; deploy/destroy gated by environments | Done |
 
-Static validation is not a deployment. Criteria 1, 2, 4, 5 and 6 are only proven once
-phase 8 has run in a real account.
+Static validation is not a deployment. Criteria 1, 2 and 4 were proven by the first real deploy
+on 2026-10-25. Criteria 5 and 6 stay unproven until `stop-start.yml` and `destroy.yml` have run.
 
 ## Progress log
 
