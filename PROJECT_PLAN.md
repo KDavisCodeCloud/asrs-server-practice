@@ -39,14 +39,14 @@ so all server administration can be practised by hand through SSM sessions.
 | 3 | Manual administration from sessions | No user data, no OS configuration | By design |
 | 4 | Deploys through GitHub Actions | `deploy.yml` (OIDC, environment approval) | Yes, run 40240002742 |
 | 5 | Stop and restart | `stop-start.yml` | After phase 8 |
-| 6 | Full destroy through GitHub Actions | `destroy.yml` (typed confirmation, environment approval) | After phase 8 |
+| 6 | Full destroy through GitHub Actions | `destroy.yml` (typed confirmation, environment approval) | Yes, run 40258555377 on 2026-10-25: stack deleted, instances terminated, no volumes, VPC or snapshots left |
 | 7 | 25 exercises documented | `labs/` | Done |
 | 8 | No OS administration automated | No `UserData`, no SSM documents, no associations | Done |
 | 9 | Templates pass static validation | `validate.yml`, run locally | Done |
 | 10 | Nothing deploys without approval | All AWS workflows are `workflow_dispatch`; deploy/destroy gated by environments | Done |
 
-Static validation is not a deployment. Criteria 1, 2 and 4 were proven by the first real deploy
-on 2026-10-25. Criteria 5 and 6 stay unproven until `stop-start.yml` and `destroy.yml` have run.
+Static validation is not a deployment. Criteria 1, 2, 4 and 6 were proven in a real account
+on 2026-10-25. Criterion 5 stays unproven until `stop-start.yml` has run.
 
 ## Progress log
 
